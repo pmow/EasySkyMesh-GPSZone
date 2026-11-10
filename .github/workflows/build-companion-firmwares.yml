@@ -8,6 +8,8 @@ on:
   push:
     tags:
       - 'companion-*'
+    branches:
+      - 'gps-privacy-zone'   # build all companions (with GPS privacy zone) on every push to this branch
 
 jobs:
   build-companion-firmwares:
