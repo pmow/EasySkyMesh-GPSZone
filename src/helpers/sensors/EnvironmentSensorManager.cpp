@@ -1,4 +1,5 @@
 #include "EnvironmentSensorManager.h"
+#include <helpers/GpsPrivacyZone.h>
 
 #include <Wire.h>
 
@@ -701,7 +702,11 @@ bool EnvironmentSensorManager::begin() {
 bool EnvironmentSensorManager::querySensors(uint8_t requester_permissions, CayenneLPP& telemetry) {
   next_available_channel = TELEM_CHANNEL_SELF + 1;
 
-  if (requester_permissions & TELEM_PERM_LOCATION && gps_active) {
+  if (requester_permissions & TELEM_PERM_LOCATION && gps_active
+#if WITH_GPS_PRIVACY_ZONE
+      && !gps_privacy_zone.shouldHide(node_lat, node_lon)   // never report position inside the privacy zone
+#endif
+      ) {
     telemetry.addGPS(TELEM_CHANNEL_SELF, node_lat, node_lon, node_altitude);
   }
 
@@ -721,8 +726,23 @@ int EnvironmentSensorManager::getNumSettings() const {
   #if ENV_INCLUDE_GPS
     if (gps_detected) settings++;  // only show GPS setting if GPS is detected
   #endif
+#if WITH_GPS_PRIVACY_ZONE
+  settings += gps_privacy_zone.getNumSettings();
+#endif
   return settings;
 }
+
+#if WITH_GPS_PRIVACY_ZONE
+// index of the first GPS privacy zone setting (they come after the GPS setting)
+static int zoneSettingBase(bool gps_detected) {
+  #if ENV_INCLUDE_GPS
+    return gps_detected ? 1 : 0;
+  #else
+    (void)gps_detected;
+    return 0;
+  #endif
+}
+#endif
 
 const char* EnvironmentSensorManager::getSettingName(int i) const {
   int settings = 0;
@@ -731,7 +751,11 @@ const char* EnvironmentSensorManager::getSettingName(int i) const {
       return "gps";
     }
   #endif
+#if WITH_GPS_PRIVACY_ZONE
+  return gps_privacy_zone.getSettingName(i - zoneSettingBase(gps_detected));
+#else
   return NULL;
+#endif
 }
 
 const char* EnvironmentSensorManager::getSettingValue(int i) const {
@@ -741,10 +765,17 @@ const char* EnvironmentSensorManager::getSettingValue(int i) const {
       return gps_active ? "1" : "0";
     }
   #endif
+#if WITH_GPS_PRIVACY_ZONE
+  return gps_privacy_zone.getSettingValue(i - zoneSettingBase(gps_detected));
+#else
   return NULL;
+#endif
 }
 
 bool EnvironmentSensorManager::setSettingValue(const char* name, const char* value) {
+#if WITH_GPS_PRIVACY_ZONE
+  if (gps_privacy_zone.setSettingValue(name, value)) return true;
+#endif
   #if ENV_INCLUDE_GPS
   if (gps_detected && strcmp(name, "gps") == 0) {
     if (strcmp(value, "0") == 0) {

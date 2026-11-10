@@ -152,6 +152,13 @@ build_firmware() {
   # disable debug flags if requested
   disable_debug_flags
 
+  # GPS privacy zone: compiled into every companion firmware (not repeaters / room servers / sensors)
+  # (restored at the end of this function so it can't leak into the next target's build)
+  GPS_ZONE_SAVED_FLAGS="${PLATFORMIO_BUILD_FLAGS}"
+  if [[ "$1" == *_companion_radio_* ]]; then
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DWITH_GPS_PRIVACY_ZONE=1"
+  fi
+
   # build firmware target
   pio run -e $1
 
@@ -181,6 +188,7 @@ build_firmware() {
     cp .pio/build/$1/firmware.uf2 out/${FIRMWARE_FILENAME}.uf2 2>/dev/null || true
   fi
 
+  export PLATFORMIO_BUILD_FLAGS="${GPS_ZONE_SAVED_FLAGS}"
 }
 
 # firmwares containing $1 will be built

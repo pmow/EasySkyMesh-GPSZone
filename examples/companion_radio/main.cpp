@@ -1,6 +1,7 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #include "MyMesh.h"
+#include <helpers/GpsPrivacyZone.h>
 
 // PowerSaving variant
 #include "helpers/PowerSaving.h"
@@ -174,14 +175,17 @@ void setup() {
       ExtraFS.begin();
   #endif
   #endif
+  GPS_ZONE_BEGIN(&InternalFS);
   store.begin();
   the_mesh.begin();
 #elif defined(RP2040_PLATFORM)
   LittleFS.begin();
+  GPS_ZONE_BEGIN(&LittleFS);
   store.begin();
   the_mesh.begin();
 #elif defined(ESP32)
   SPIFFS.begin(true);
+  GPS_ZONE_BEGIN(&SPIFFS);
   store.begin();
   the_mesh.begin();
 #else

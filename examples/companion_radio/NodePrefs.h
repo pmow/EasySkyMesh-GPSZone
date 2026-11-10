@@ -56,6 +56,10 @@ public:
   // PowerSaving variant
   uint8_t powersaving_enabled = 0; // boolean
 
+  // automatic adverts (0 = off), same ranges as repeater: 60-240 minutes / 3-168 hours
+  uint16_t advert_interval_mins = 0;        // zero-hop advert to nearby nodes
+  uint8_t  flood_advert_interval_hours = 0; // advert flooded across the mesh
+
 #ifdef ENABLE_WIFI_INTERFACE
   #ifndef WIFI_SSID
     #define WIFI_SSID ""
@@ -183,6 +187,8 @@ private:
       def("tel_loc", _parent->telemetry_mode_loc);
       def("tel_env", _parent->telemetry_mode_env);
       def("tz_offset", _parent->tz_offset);
+      def("adv_int", _parent->advert_interval_mins);          // minutes, 0 = off
+      def("f_adv_int", _parent->flood_advert_interval_hours); // hours, 0 = off
     }
   public:
     CompanionPrefs(NodePrefs* parent) : _parent(parent) { }

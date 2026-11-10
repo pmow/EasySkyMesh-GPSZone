@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/GpsPrivacyZone.h>
 
 #include <Arduino.h> // needed for PlatformIO
 #ifdef ENABLE_WIFI_INTERFACE
@@ -109,6 +110,9 @@
 #define FLOOD_SEND_TIMEOUT_FACTOR       16.0f
 #define DIRECT_SEND_PERHOP_FACTOR       6.0f
 #define DIRECT_SEND_PERHOP_EXTRA_MILLIS 250
+#ifndef BOOT_ADVERT_DELAY_MS
+  #define BOOT_ADVERT_DELAY_MS          15000   // advert this long after boot
+#endif
 #define LAZY_CONTACTS_WRITE_DELAY       5000
 
 #define PUBLIC_GROUP_PSK                "izOH6cXN6mrJ5e26oRXNcg=="
@@ -909,6 +913,8 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   next_ack_idx = 0;
   sign_data = NULL;
   dirty_contacts_expiry = 0;
+  next_local_advert = next_flood_advert = 0;
+  boot_advert_at = 0;
   memset(advert_paths, 0, sizeof(advert_paths));
   memset(send_scope.key, 0, sizeof(send_scope.key));
   send_unscoped = false;
@@ -1027,6 +1033,16 @@ void MyMesh::begin() {
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
 
   board.attachDynamicPrefs(_prefs.getCustom());
+
+  // automatic adverts: sanitise saved values, then start the timers
+  if (_prefs.advert_interval_mins != 0)
+    _prefs.advert_interval_mins = constrain(_prefs.advert_interval_mins, 60, 240);
+  if (_prefs.flood_advert_interval_hours != 0)
+    _prefs.flood_advert_interval_hours = constrain(_prefs.flood_advert_interval_hours, 3, 168);
+  updateAdvertTimers();
+
+  // one zero-hop advert shortly after boot, once the radio and BLE have settled
+  boot_advert_at = futureMillis(BOOT_ADVERT_DELAY_MS);
 
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
@@ -1316,7 +1332,8 @@ void MyMesh::handleCmdFrame(size_t len) {
     }
   } else if (cmd_frame[0] == CMD_SEND_SELF_ADVERT) {
     mesh::Packet* pkt;
-    if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
+    if (_prefs.advert_loc_policy == ADVERT_LOC_NONE
+        || GPS_ZONE_HIDE(sensors.node_lat, sensors.node_lon)) {
       pkt = createSelfAdvert(_prefs.node_name);
     } else {
       pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
@@ -1400,7 +1417,8 @@ void MyMesh::handleCmdFrame(size_t len) {
     if (len < 1 + PUB_KEY_SIZE) {
       // export SELF
       mesh::Packet* pkt;
-      if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
+      if (_prefs.advert_loc_policy == ADVERT_LOC_NONE
+          || GPS_ZONE_HIDE(sensors.node_lat, sensors.node_lon)) {
         pkt = createSelfAdvert(_prefs.node_name);
       } else {
         pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
@@ -2209,6 +2227,65 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char*
   }
 #endif
 
+  // automatic adverts (same commands and ranges as the repeater CLI)
+  if (strncmp(command, "set advert.interval ", 20) == 0) {
+    int mins = atoi(&command[20]);
+    if (command[20] < '0' || command[20] > '9' || (mins > 0 && mins < 60) || mins > 240) {
+      strcpy(reply, "Error: interval range is 60-240 minutes (0 = off)");
+    } else {
+      _prefs.advert_interval_mins = (uint16_t)mins;
+      savePrefs();
+      updateAdvertTimers();
+      strcpy(reply, "OK");
+    }
+    return true;
+  }
+  if (strncmp(command, "set flood.advert.interval ", 26) == 0) {
+    int hours = atoi(&command[26]);
+    if (command[26] < '0' || command[26] > '9' || (hours > 0 && hours < 3) || hours > 168) {
+      strcpy(reply, "Error: interval range is 3-168 hours (0 = off)");
+    } else {
+      _prefs.flood_advert_interval_hours = (uint8_t)hours;
+      savePrefs();
+      updateAdvertTimers();
+      strcpy(reply, "OK");
+    }
+    return true;
+  }
+  if (strcmp(command, "get advert.interval") == 0) {
+    sprintf(reply, "> %d", (int)_prefs.advert_interval_mins);
+    return true;
+  }
+  if (strcmp(command, "get flood.advert.interval") == 0) {
+    sprintf(reply, "> %d", (int)_prefs.flood_advert_interval_hours);
+    return true;
+  }
+
+#if WITH_GPS_PRIVACY_ZONE
+  // GPS privacy zone: zone | zone on|off|clear | zone1..zone4 <lat> <lon> | zone1..zone4 here
+  {
+    bool has_fix = false;
+  #if ENV_INCLUDE_GPS == 1
+    LocationProvider* loc = sensors.getLocationProvider();
+    has_fix = loc != NULL && loc->isValid();
+  #endif
+    // Local commands (app over BLE/USB, serial console) reply into reply_buf, possibly past a
+    // reflected "xx|" prefix. Anything else is remote CLI over LoRa: the zone corners are
+    // effectively the owner's home location, so they are never read or changed remotely.
+    bool is_local = reply >= reply_buf && reply < reply_buf + sizeof(reply_buf);
+    if (is_local) {
+      int room = (int)sizeof(reply_buf) - (int)(reply - reply_buf);
+      if (gps_privacy_zone.handleCommand(command, reply, room, sensors.node_lat, sensors.node_lon, has_fix)) {
+        return true;
+      }
+    } else if (strncmp(command, "zone", 4) == 0
+               && (command[4] == 0 || command[4] == ' ' || (command[4] >= '1' && command[4] <= '4'))) {
+      strcpy(reply, "Error: zone settings are local only");
+      return true;
+    }
+  }
+#endif
+
   // PowerSaving variant
   if (strcmp(command, "powersaving on") == 0 || strcmp(command, "powersaving off") == 0) {
     _prefs.powersaving_enabled = strcmp(command, "powersaving on") == 0 ? 1 : 0;
@@ -2554,6 +2631,21 @@ void MyMesh::loop() {
 #endif
   }
 
+  // one-time advert after boot (location policy + GPS privacy zone apply as usual)
+  if (boot_advert_at && millisHasNowPassed(boot_advert_at)) {
+    boot_advert_at = 0;
+    advert();
+  }
+
+  // automatic adverts (a flood advert also reaches nearby nodes, so it restarts the local timer)
+  if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
+    floodAdvert();
+    updateAdvertTimers();
+  } else if (next_local_advert && millisHasNowPassed(next_local_advert)) {
+    advert();
+    next_local_advert = futureMillis((int)_prefs.advert_interval_mins * 60 * 1000);
+  }
+
   // is there are pending dirty contacts write needed?
   if (dirty_contacts_expiry && millisHasNowPassed(dirty_contacts_expiry)) {
     saveContacts();
@@ -2561,13 +2653,16 @@ void MyMesh::loop() {
   }
 }
 
-bool MyMesh::advert() {
-  mesh::Packet* pkt;
-  if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
-    pkt = createSelfAdvert(_prefs.node_name);
-  } else {
-    pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
+mesh::Packet* MyMesh::createOwnAdvert() {
+  if (_prefs.advert_loc_policy == ADVERT_LOC_NONE
+      || GPS_ZONE_HIDE(sensors.node_lat, sensors.node_lon)) {
+    return createSelfAdvert(_prefs.node_name);
   }
+  return createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
+}
+
+bool MyMesh::advert() {
+  mesh::Packet* pkt = createOwnAdvert();
   if (pkt) {
     sendZeroHop(pkt);
     return true;
@@ -2576,8 +2671,25 @@ bool MyMesh::advert() {
   }
 }
 
+bool MyMesh::floodAdvert() {
+  mesh::Packet* pkt = createOwnAdvert();
+  if (!pkt) return false;
+  TransportKey default_scope;
+  memcpy(&default_scope.key, _prefs.default_scope_key, sizeof(default_scope.key));
+  sendFloodScoped(default_scope, pkt, 0);
+  return true;
+}
+
+void MyMesh::updateAdvertTimers() {
+  next_local_advert = _prefs.advert_interval_mins
+      ? futureMillis((int)_prefs.advert_interval_mins * 60 * 1000) : 0;
+  next_flood_advert = _prefs.flood_advert_interval_hours
+      ? futureMillis((int)_prefs.flood_advert_interval_hours * 60 * 60 * 1000) : 0;
+}
+
 // PowerSaving variant
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {
-  return _mgr->getOutboundTotal() > 0 || dirty_contacts_expiry != 0 || isTransmitting() || _prefs.getRadioPrefs()->isRxPowerSavingCalibrationActive();
+  return boot_advert_at != 0   // stay awake for the few seconds until the boot advert is sent
+      || _mgr->getOutboundTotal() > 0 || dirty_contacts_expiry != 0 || isTransmitting() || _prefs.getRadioPrefs()->isRxPowerSavingCalibrationActive();
 }

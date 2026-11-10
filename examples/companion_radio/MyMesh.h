@@ -122,6 +122,7 @@ public:
   void loop();
   void handleCmdFrame(size_t len);
   bool advert();
+  bool floodAdvert();
   void enterCLIRescue();
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
@@ -261,6 +262,11 @@ private:
   uint8_t *sign_data;
   uint32_t sign_data_len;
   unsigned long dirty_contacts_expiry;
+  unsigned long next_local_advert;   // 0 = automatic zero-hop advert off
+  unsigned long next_flood_advert;   // 0 = automatic flood advert off
+  unsigned long boot_advert_at;      // one-time advert shortly after boot, 0 = done
+  void updateAdvertTimers();
+  mesh::Packet* createOwnAdvert();    // honours advert location policy + GPS privacy zone
 
   TransportKey send_scope;
 
